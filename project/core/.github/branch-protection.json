@@ -1,0 +1,94 @@
+{
+  "_readme": [
+    "GitHub の branch protection に「こう設定してあるはず」という期待値の唯一の置き場所。",
+    "人間向けの要約と理由は docs/agents/commit-identity-and-ci-gate.md の 2-7（ここが正、あちらは要約）。",
+    "",
+    "設定を変えたときに直すファイル（ここが唯一の一覧）:",
+    "  1. このファイル",
+    "  2. docs/agents/commit-identity-and-ci-gate.md 2-7",
+    "  3. required の context 名を変えた場合のみ: .github/workflows/pr-gate.yml の jobs.gate.name と .github/required-checks.txt",
+    "他のファイル（CLAUDE.md / エージェント定義 / scripts）に設定値を書き写さないこと。",
+    "",
+    "書式:",
+    "  branches … 同じ設定であることを要求するブランチ",
+    "  fields   … path  : GET /repos/{o}/{r}/branches/{b}/protection の応答への jq パス",
+    "             expect: 期待する値（配列は順序を無視して比較する）",
+    "             why   : なぜその値なのか",
+    "",
+    "手元での突き合わせ（admin 権限の gh が必要。CI の GITHUB_TOKEN では読めない）:",
+    "  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)",
+    "  for b in dev staging main; do gh api repos/$REPO/branches/$b/protection > /tmp/bp-$b.json; done",
+    "  jq -r '.fields[] | \"\\(.path)\\t\\(.expect|tojson)\"' .github/branch-protection.json  # と見比べる",
+    "",
+    "限界: 保護が丸ごと外された場合は PR ゲート自体が required でなくなるので、何も止まらない。",
+    "      rulesets（新しい仕組み）は対象外。branch protection（classic）のみ。"
+  ],
+  "branches": ["dev", "staging", "main"],
+  "fields": [
+    {
+      "path": ".required_status_checks.contexts",
+      "expect": ["PR ゲート"],
+      "why": "paths: 無しで毎回走る唯一のジョブ。条件付きで走るジョブを必須にすると、触っていない PR で永久 pending になる"
+    },
+    {
+      "path": ".required_status_checks.strict",
+      "expect": false,
+      "why": "true は全 PR に無条件で base 追随を強いる（O(n^2) の CI 消費）。base drift はマージゲートが免除条件つきで見る"
+    },
+    {
+      "path": ".required_pull_request_reviews.required_approving_review_count",
+      "expect": 0,
+      "why": "全エージェントが同一アカウントを共有し self-review が成立しないため、1 以上にすると誰もマージできない。承認の証跡は approved ラベル + 評決マーカー（3-1-1）"
+    },
+    {
+      "path": ".required_pull_request_reviews.dismiss_stale_reviews",
+      "expect": false,
+      "why": "review 自体が成立しないため意味を持たない（3-1）"
+    },
+    {
+      "path": ".required_pull_request_reviews.require_code_owner_reviews",
+      "expect": false,
+      "why": "CODEOWNERS を運用していない"
+    },
+    {
+      "path": ".required_pull_request_reviews.require_last_push_approval",
+      "expect": false,
+      "why": "Approve 後の push はマージゲートの評決マーカー（3-1-1）が SHA 一致で弾く"
+    },
+    {
+      "path": ".enforce_admins.enabled",
+      "expect": true,
+      "why": "全エージェントが admin 権限のアカウントを共有しているため、false だと守るべき相手が全員素通りする"
+    },
+    {
+      "path": ".allow_force_pushes.enabled",
+      "expect": false,
+      "why": "dev / staging / main の履歴を書き換えられないようにする"
+    },
+    {
+      "path": ".allow_deletions.enabled",
+      "expect": false,
+      "why": "統合ブランチを消せないようにする"
+    },
+    {
+      "path": ".required_linear_history.enabled",
+      "expect": false,
+      "why": "昇格 PR（dev → staging → main）の merge commit を許すため"
+    },
+    {
+      "path": ".required_conversation_resolution.enabled",
+      "expect": false,
+      "why": "レビューは gh pr comment で記録しており、GitHub の review スレッドを使っていない（3-1）"
+    },
+    {
+      "path": ".lock_branch.enabled",
+      "expect": false,
+      "why": "ロックすると PR 経由でもマージできなくなる"
+    },
+    {
+      "path": ".required_signatures.enabled",
+      "expect": false,
+      "why": "署名コミットを運用していない。true にすると全エージェントの commit が拒否される"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+# マージ後の再検証（.github/workflows/post-merge-verify.yml）が行う検査の一覧。
+# 書式は .github/pr-gate-checks.txt と同じ（`<ステップ id> <always|deep> <ラベル…>`）。
+#
+# deep の扱い: 毎マージ（merge-gate からの workflow_call）では --deferred 付きで集計され、
+#   deep の項目の skipped だけが「延期」として許容される。schedule / push / workflow_dispatch では
+#   --deferred を付けないので、deep が skip されていたら落ちる。
+#   **staging / main への昇格（push）では必ず deep も走る。**
+# ステップを足す / 消すときは、このファイルとワークフローの集計ステップを同じ PR で直すこと。
+
+lint      always lint（LINT_CMD）
+typecheck always typecheck（TYPECHECK_CMD）
+extras    always 拡張検査（scripts/gate-extra.d/）
+test      deep   test（TEST_CMD）
+build     deep   build（BUILD_CMD）

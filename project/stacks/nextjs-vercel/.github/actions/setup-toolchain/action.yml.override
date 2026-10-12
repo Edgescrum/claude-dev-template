@@ -1,0 +1,13 @@
+name: setup-toolchain
+description: >-
+  nextjs-vercel 部品: Node.js と npm キャッシュの準備。PR ゲートとマージ後検証の両方が呼ぶ。
+  Node のバージョンの正は .nvmrc（部品が同梱する）。依存のインストールはワークフロー側の INSTALL_CMD が行う。
+
+runs:
+  using: composite
+  steps:
+    - name: "Node.js を用意する（.nvmrc）"
+      uses: actions/setup-node@v4
+      with:
+        node-version-file: .nvmrc
+        cache: npm

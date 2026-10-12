@@ -1,0 +1,2 @@
+# supabase 部品
+supabase-migration-versions always migration version の衝突・逆行（dev / staging / main）

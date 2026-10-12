@@ -1,0 +1,236 @@
+name: Post-merge Verify
+
+# マージされた後の長寿命ブランチ（dev / staging / main）を、全ゲートで検証し直す。
+#
+# なぜ必要か: merge-gate.yml（予防）は `gh pr merge` の直叩きで迂回できる。防げないなら即座に気づけるようにする:
+#   1. ブランチの HEAD に対して全ゲートを走らせ直す（base drift による統合後の赤はここでしか見えない）
+#   2. 赤ければ失敗させ、Issue を自動起票する（scripts/report-ci-failure.sh）
+#   3. マージゲートを通していない PR マージを検知して Issue を起票する（scripts/check-merge-gate-bypass.sh）
+#   4. 迂回マージで閉じ損ねた Issue を閉じる（scripts/close-linked-issues.mjs）
+
+on:
+  push:
+    branches:
+      - dev
+      - staging
+      - main
+  # 消さないこと: close-issues の経路を実際の権限で疎通確認する口であり、ワークフローの登録の足がかり
+  # （workflow_call で呼ばれた run は caller のものになるので、それだけでは登録されない）。
+  pull_request:
+    paths:
+      - .github/workflows/post-merge-verify.yml
+      - scripts/close-linked-issues.mjs
+      - scripts/check-merge-gate-bypass.sh
+  # 1 日 1 回の deep 検証。⚠️ schedule は既定ブランチ（main）のワークフローしか起動しない。
+  schedule:
+    - cron: "7 3 * * *"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "検証するブランチ"
+        required: false
+        default: dev
+      deep:
+        description: "skip にすると deep（test / build）を走らせない。既定は run"
+        required: false
+        default: run
+      close_issues_probe_range:
+        description: "close-issues の疎通確認に使う push レンジ <before>..<after>（--dry-run で走る）"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      branch:
+        type: string
+        required: true
+      trigger:
+        type: string
+        required: false
+        default: workflow_call
+      # 値は run / skip の文字列。`skip` という文字列だけを「deep を走らせない」と解釈するので、
+      # 書き間違いは必ず安全側（deep も走る）に倒れる。
+      deep:
+        type: string
+        required: false
+        default: run
+
+permissions:
+  contents: read
+  issues: write
+  # commits/{sha}/pulls は Pull requests (read) を要求する（Contents では代替できない）。
+  # 無いと 403 か、404 が「PR 0 件」に化けて無言の緑になる。
+  pull-requests: read
+
+concurrency:
+  group: post-merge-verify-${{ inputs.branch || (github.event_name == 'schedule' && 'dev') || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: マージ後の全ゲート再実行
+    # PR では走らせない（PR ゲートが同じ検査を回している）。
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    env:
+      # schedule は既定ブランチで起動するが、検証したいのは dev。
+      BRANCH: ${{ inputs.branch || (github.event_name == 'schedule' && 'dev') || github.ref_name }}
+      # deep: skip のときだけ deep を走らせない。空や書き間違いは必ず full 側に倒れる。
+      FULL: ${{ inputs.deep == 'skip' && 'false' || 'true' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # ブランチの現在の HEAD を見る（merge-gate から呼ばれた場合、caller の SHA はマージ前）。
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+
+      - name: ツールチェーンの準備
+        uses: ./.github/actions/setup-toolchain
+
+      - name: 依存のインストール（INSTALL_CMD）
+        run: bash scripts/run-gate-command.sh INSTALL_CMD
+
+      # 1 つ落ちても残りを走らせる（1 回の実行で全部の状況がわかるようにする）。
+      - name: lint（LINT_CMD）
+        id: lint
+        continue-on-error: true
+        run: bash scripts/run-gate-command.sh LINT_CMD
+
+      - name: typecheck（TYPECHECK_CMD）
+        id: typecheck
+        continue-on-error: true
+        run: bash scripts/run-gate-command.sh TYPECHECK_CMD
+
+      - name: 拡張検査（scripts/gate-extra.d/）
+        id: extras
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ env.BRANCH }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"; export HEAD_SHA
+          if [ "$FULL" = "true" ]; then
+            bash scripts/run-gate-extras.sh --context post-merge
+          else
+            bash scripts/run-gate-extras.sh --context post-merge --deferred
+          fi
+
+      # deep: 毎マージ（merge-gate からの deep: skip）では走らせず、schedule と push（昇格を含む）で走る。
+      # skip は合格ではない。post-merge-checks.txt で deep と宣言した項目だけが --deferred 付きで許容される。
+      - name: test（TEST_CMD）
+        id: test
+        if: ${{ env.FULL == 'true' }}
+        continue-on-error: true
+        run: bash scripts/run-gate-command.sh TEST_CMD
+
+      - name: build（BUILD_CMD）
+        id: build
+        if: ${{ env.FULL == 'true' }}
+        continue-on-error: true
+        run: bash scripts/run-gate-command.sh BUILD_CMD
+
+      # このステップに continue-on-error を付けてはいけない（付けると 1 つ落ちても緑になる）。
+      - name: 結果を集計する
+        id: summary
+        run: |
+          set -euo pipefail
+          deferred=()
+          if [ "$FULL" != "true" ]; then deferred=(--deferred); fi
+          bash scripts/gate-summary.sh .github/post-merge-checks.txt \
+            --title "マージ後の検証: $BRANCH" \
+            ${deferred[@]+"${deferred[@]}"} \
+            --outcome "lint=${{ steps.lint.outputs.status == 'unconfigured' && 'unconfigured' || steps.lint.outcome }}" \
+            --outcome "typecheck=${{ steps.typecheck.outputs.status == 'unconfigured' && 'unconfigured' || steps.typecheck.outcome }}" \
+            --outcome "extras=${{ steps.extras.outcome }}" \
+            --outcome "test=${{ steps.test.outputs.status == 'unconfigured' && 'unconfigured' || steps.test.outcome }}" \
+            --outcome "build=${{ steps.build.outputs.status == 'unconfigured' && 'unconfigured' || steps.build.outcome }}"
+
+      - name: 赤かったら Issue を起票する
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          FAILED: ${{ steps.summary.outputs.failed }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/report-ci-failure.sh
+
+  close-issues:
+    # 迂回マージ（gh pr merge 直叩き / UI）で閉じ損ねた Issue を拾う保険。正規経路は merge-gate.yml が閉じる。
+    # dev に限る: PR① の base は dev だけ。staging は昇格、main は GitHub 本体が閉じる。
+    # 両方走ってもスクリプト側がべき等。
+    name: マージ済み PR の Issue を閉じる
+    if: >-
+      ${{ (github.event_name == 'push' && github.ref_name == 'dev')
+          || (github.event_name == 'workflow_dispatch'
+              && github.event.inputs.close_issues_probe_range != '') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Close linked issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          PROBE_RANGE: ${{ github.event.inputs.close_issues_probe_range }}
+          EVENT: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            # 疎通確認。--dry-run 固定（何も閉じない）。
+            echo "::notice::疎通確認モード（--dry-run）: $PROBE_RANGE"
+            node scripts/close-linked-issues.mjs --push-range "$PROBE_RANGE" --repo "$GH_REPO" --dry-run
+          else
+            node scripts/close-linked-issues.mjs --push-range "${BEFORE_SHA}..${AFTER_SHA}" --repo "$GH_REPO"
+          fi
+
+  close-issues-smoke:
+    # close-issues の経路をこのワークフローの権限で実際に走らせる（--dry-run 固定・何も閉じない）。
+    # ★ 必須リストには入れない（paths: 限定）。
+    name: Issue クローズ経路の疎通確認
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: 直近の dev マージ 1 件で疎通する（--dry-run）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          after="$(gh api "repos/$GH_REPO/commits/dev" -q .sha)"
+          before="$(gh api "repos/$GH_REPO/commits/dev" -q '.parents[0].sha')"
+          echo "probe range: ${before}..${after}"
+          # out="$(...)" を素で書かない（set -e で診断を 1 行も出さずに終わる）。rc を分けて必ず本文を出す。
+          rc=0
+          out="$(node scripts/close-linked-issues.mjs \
+                   --push-range "${before}..${after}" --repo "$GH_REPO" --dry-run 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::疎通確認が exit ${rc} で失敗しました（上の出力に原因があります）。"
+            exit 1
+          fi
+          # 緑になるだけでは足りない（404 が空配列に化けても緑になりうる）。PR を 1 件以上引けたことを要求する。
+          # dev の直近コミットは squash マージなので必ず PR に紐づく（dev が初期コミットだけの間は失敗する）。
+          if ! printf '%s' "$out" | grep -q 'のマージ済み PR: #'; then
+            echo "::error::commits/{sha}/pulls から PR を引けませんでした。権限（pull-requests: read）を確認すること。"
+            exit 1
+          fi
+          echo "OK: この権限で commits/{sha}/pulls を引けています。"
+
+  bypass-check:
+    # マージゲートを通さずにマージされた PR を事後に検知する（予防はできない）。
+    name: マージゲートの迂回検知
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Detect merges that skipped the gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/check-merge-gate-bypass.sh

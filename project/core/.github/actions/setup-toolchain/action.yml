@@ -1,0 +1,16 @@
+name: setup-toolchain
+description: >-
+  言語ランタイムと依存キャッシュの準備（スタック部品が差し替える拡張点）。
+  コアの既定は何もしない（ubuntu-latest に同梱の bash / git / jq / gh / node だけで
+  ゲートのスクリプトは動く）。Node.js なら actions/setup-node、Python なら actions/setup-python を
+  ここに書く。PR ゲートとマージ後検証の両方がこのアクションを呼ぶ。
+
+runs:
+  using: composite
+  steps:
+    - name: "ツールチェーン（既定: 何もしない）"
+      shell: bash
+      run: |
+        echo "setup-toolchain: コアの既定（何もしない）。スタック部品がこのファイルを差し替える。"
+        command -v jq >/dev/null && command -v gh >/dev/null && command -v node >/dev/null \
+          || { echo "::error::jq / gh / node のいずれかがありません。ゲートのスクリプトが動きません。"; exit 1; }

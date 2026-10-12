@@ -1,0 +1,153 @@
+name: PR Gate
+
+# PR で毎回走る検査を 1 ジョブにまとめたもの。
+#
+# なぜ 1 ジョブか: GitHub Actions の課金はジョブ単位で 1 分に切り上げられる。
+#   数秒の検査をジョブに分けると、それだけで課金が何倍にもなる。ステップに分けても UI の粒度は残る。
+#
+# 統合の代償と塞ぎ方（ここを読まずに触らないこと）:
+#   ステップは必須ジョブの存在確認（.github/required-checks.txt）の対象にならないので、
+#   ステップを 1 つ消すだけで検査が黙って消える。そこで
+#     1. .github/pr-gate-checks.txt（manifest）が「何を検査するか」の正
+#     2. scripts/gate-summary.sh が manifest の id の outcome が 1 つでも欠ける / success でなければ落とす
+#   `continue-on-error: true` は握り潰しではなく「1 回の実行で全部の状況を出す」ため。落とすのは集計の役目。
+#
+# コマンドは .github/gate-commands.env で宣言する（このファイルに npm 等を直書きしない）。
+# スタック固有の検査は scripts/gate-extra.d/*.sh に置く（docs/agents/commit-identity-and-ci-gate.md 2-11）。
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - staging
+      - main
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "検査する PR 番号（必須ジョブ存在確認に使う）"
+        required: false
+
+permissions:
+  contents: read
+  checks: read
+  statuses: read
+  pull-requests: read
+  # check-runs の取得に必要。無いと空の結果が返り、「チェック 0 件」と誤読しうる。
+  actions: read
+
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    # ★ ジョブ名を変えたら .github/required-checks.txt と .github/branch-protection.json も同じ PR で直すこと。
+    name: PR ゲート
+    runs-on: ubuntu-latest
+    env:
+      BASE_REF: ${{ github.event.pull_request.base.ref || 'dev' }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # merge commit ではなく PR ブランチの HEAD を検査する（マージ結果は MERGE_REF で別途取る）。
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: ツールチェーンの準備
+        uses: ./.github/actions/setup-toolchain
+
+      # continue-on-error にしない。依存が入らなければ以降は「落ちた」ではなく「実行できていない」。
+      - name: 依存のインストール（INSTALL_CMD）
+        run: bash scripts/run-gate-command.sh INSTALL_CMD
+
+      - name: 比較対象のブランチを取ってくる
+        run: |
+          set -euo pipefail
+          # fetch に失敗したら落とす。取れないまま進むと検査が無効化される。
+          for b in "$BASE_REF" dev; do
+            git fetch --no-tags --quiet origin "$b:refs/remotes/origin/$b" 2>/dev/null \
+              || git rev-parse --verify --quiet "refs/remotes/origin/$b" >/dev/null \
+              || { echo "::error::origin/$b を fetch できませんでした。検査を無効化しないため失敗させます。"; exit 1; }
+          done
+          # マージ結果（拡張検査が使う）。コンフリクト中は存在しないので空にする（使う側が必ず失敗させる）。
+          if [ -n "${PR_NUMBER:-}" ] \
+             && git fetch --no-tags --quiet origin "refs/pull/$PR_NUMBER/merge:refs/remotes/origin/pr-merge"; then
+            echo "MERGE_REF=refs/remotes/origin/pr-merge" >>"$GITHUB_ENV"
+          else
+            echo "::warning::refs/pull/<N>/merge を取得できませんでした（コンフリクトの可能性）。"
+            echo "MERGE_REF=" >>"$GITHUB_ENV"
+          fi
+
+      # =====================================================================
+      # 以降が「毎 push で必ず走る検査」。id は .github/pr-gate-checks.txt と 1 対 1。
+      # 足す / 消すときは manifest と集計ステップも同じ PR で直すこと。
+      # =====================================================================
+
+      # squash 後の dev では author が正しくなるため、PR の全コミットを見ないと気づけない。
+      - name: PR の全コミットの author を検証
+        id: authors
+        continue-on-error: true
+        run: bash scripts/check-commit-authors.sh "origin/$BASE_REF" "$HEAD_SHA"
+
+      - name: lint（LINT_CMD）
+        id: lint
+        continue-on-error: true
+        run: bash scripts/run-gate-command.sh LINT_CMD
+
+      - name: typecheck（TYPECHECK_CMD）
+        id: typecheck
+        continue-on-error: true
+        run: bash scripts/run-gate-command.sh TYPECHECK_CMD
+
+      - name: test（TEST_CMD）
+        id: test
+        continue-on-error: true
+        run: bash scripts/run-gate-command.sh TEST_CMD
+
+      - name: build（BUILD_CMD）
+        id: build
+        continue-on-error: true
+        run: bash scripts/run-gate-command.sh BUILD_CMD
+
+      # 拡張点。scripts/gate-extra.d/*.sh を全部実行し、.github/gate-extra-checks.txt と突き合わせて集計する。
+      - name: 拡張検査（scripts/gate-extra.d/）
+        id: extras
+        continue-on-error: true
+        run: bash scripts/run-gate-extras.sh --context pr
+
+      # 必須ジョブが「存在し、skip されていない」こと（このジョブ自身も対象。実行中は pending = 存在扱い）。
+      - name: 必須 CI ジョブの存在確認
+        id: required_jobs
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # 合否判定とジョブ存在確認が別の SHA を見ないようにする。
+          REQUIRED_CHECKS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "::error::PR 番号が分かりません（workflow_dispatch では -f pr=<番号> を渡すこと）。"
+            exit 1
+          fi
+          bash scripts/check-required-jobs.sh "$PR_NUMBER" "$GH_REPO"
+
+      # =====================================================================
+      # 集計（このステップに continue-on-error を付けてはいけない。付けると 1 つ落ちても緑になる）
+      # =====================================================================
+      # unconfigured = gate-commands.env で空にしたコマンド。集計は「未設定・未検証」と表示する（pass と書かない）。
+      - name: 結果を集計する
+        id: summary
+        run: |
+          set -euo pipefail
+          bash scripts/gate-summary.sh .github/pr-gate-checks.txt \
+            --title "PR ゲート" \
+            --outcome "authors=${{ steps.authors.outcome }}" \
+            --outcome "lint=${{ steps.lint.outputs.status == 'unconfigured' && 'unconfigured' || steps.lint.outcome }}" \
+            --outcome "typecheck=${{ steps.typecheck.outputs.status == 'unconfigured' && 'unconfigured' || steps.typecheck.outcome }}" \
+            --outcome "test=${{ steps.test.outputs.status == 'unconfigured' && 'unconfigured' || steps.test.outcome }}" \
+            --outcome "build=${{ steps.build.outputs.status == 'unconfigured' && 'unconfigured' || steps.build.outcome }}" \
+            --outcome "extras=${{ steps.extras.outcome }}" \
+            --outcome "required_jobs=${{ steps.required_jobs.outcome }}"

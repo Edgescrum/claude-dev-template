@@ -1,0 +1,17 @@
+# PR ゲート（.github/workflows/pr-gate.yml）が毎 push で必ず行う検査の一覧（manifest）。
+#
+# 書式: `<ステップ id> <flags> <ラベル…>`
+#   flags: always … 常に実行する（PR ゲートは全部 always）
+#          deep   … --deferred 付きで呼ばれたときだけ skip を許す（post-merge 側で使う）
+#
+# なぜ要るか: 検査を 1 ジョブに統合すると、ステップを 1 つ消してもジョブ名は変わらず
+#   必須ジョブの存在確認では捕まらない。scripts/gate-summary.sh がここに書いた id の outcome が
+#   1 つでも欠けたら / success でなければ落とす。**このファイルとワークフローは同じ PR で直すこと。**
+
+authors       always PR の全コミットの author を検証
+lint          always lint（LINT_CMD）
+typecheck     always typecheck（TYPECHECK_CMD）
+test          always test（TEST_CMD）
+build         always build（BUILD_CMD）
+extras        always 拡張検査（scripts/gate-extra.d/）
+required_jobs always 必須 CI ジョブの存在確認

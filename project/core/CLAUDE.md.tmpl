@@ -1,0 +1,162 @@
+# {{PROJECT_NAME}} プロジェクト指示書
+
+> この指示書は Claude Code 開発運用テンプレート（PeCo 由来）から生成した。
+> 運用の骨格（4 エージェント・ラベル・マージゲート・検証 Tier）は全プロジェクト共通で、
+> 技術スタックに固有の規則は末尾の「スタック」節にだけ書く。
+
+## プロダクト要約
+
+（Planner が Phase 0-1 で要件ドキュメントから埋める。誰の何を解決するか・料金体系・主要な制約を 5 行以内で）
+
+## 知識の置き場所
+
+| 置き場所 | 中身 |
+|---|---|
+| `CONTEXT.md` | ドメイン用語の正 |
+| `docs/adr/` | 設計判断と経緯。覆すときは新しい ADR を足し、旧 ADR を Superseded にする |
+| `{{REQUIREMENTS_DIR}}/` | 機能ごとの要件・詳細設計。Issue からはここにリンクする |
+| `docs/agents/` | エージェント運用の規約（判定表・閾値の唯一の置き場所） |
+| `docs/verification-tiers.md` | 検証 Tier の定義 |
+| `docs/runbooks/` | 本番への出し方（`release-and-hotfix.md`）などの手順書 |
+| `docs/bootstrap.md` | 初期化（Planner Phase 0）の記録。**このファイルがある = 初期化済み** |
+
+**判定表・閾値は 1 か所にだけ置き、他からは参照する。** 書き写すと、写した側が古くなる。
+
+## 環境
+
+| 環境 | ブランチ | URL |
+|---|---|---|
+| 本番 | `main` | {{PROD_URL}} |
+| デモ / UAT | `staging` | {{STAGING_URL}} |
+| 開発統合 | `dev` | ローカル |
+
+## スタック
+
+採用したスタック部品（詳細は末尾の「スタック: <名前>」節）:
+
+{{STACKS}}
+
+## コマンド
+
+ビルド・型検査・lint・テストのコマンドの正は `.github/gate-commands.env`。CI とエージェントは同じものを使う。
+
+| 用途 | 変数 |
+|---|---|
+| 依存のインストール | `INSTALL_CMD` |
+| lint | `LINT_CMD` |
+| 型検査 | `TYPECHECK_CMD` |
+| テスト | `TEST_CMD` |
+| ビルド | `BUILD_CMD` |
+
+---
+
+## 開発フロー（必須ルール）
+
+### 絶対ルール: 全てのコード変更は Generator → Evaluator → PR を通す
+
+- 規模を問わず、1 行の修正でも PR を作る。dev / staging / main への直接 commit・push は禁止
+- **例外はドキュメントのみの変更**: `docs/**`・リポジトリ直下の `*.md`・`.claude/**/*.md` だけの変更は Generator / Evaluator を省略できる（PR は必要）。範囲の正はマージゲートの許可リストで、この文と食い違えば実装が正
+- 1 バイトでもそれ以外に触れたら例外は適用されない
+
+### 検証レベル（Tier）
+
+正は `docs/verification-tiers.md`。要点だけ:
+
+- Tier は **Generator が PR 本文で申告し、Evaluator が妥当性を検算する**。**Issue には Tier を書かない**（書くと誰も選び直さない）
+- `LINT_CMD` / `TYPECHECK_CMD` / `BUILD_CMD` は全 Tier で必須。迷ったら上位の Tier
+
+### 要件定義・詳細設計
+
+- 大きめの機能は `{{REQUIREMENTS_DIR}}/` に要件を残す（会話やメモリに任せない）
+- 着手前に `CONTEXT.md`・`docs/adr/`・`{{REQUIREMENTS_DIR}}/` の既存設計を確認する
+- スプリント単位で grill（`/grill-with-docs` または `/grill-me`）による詳細設計を行い、既存挙動への回帰影響・ADR との整合・回帰テストで守る挙動を明文化する
+- grill ではデータ契約（画面が読み書きするデータの形・認可）まで決める。Issue は機能単位の縦切りにし、フロントとバックで工程を分けない。待ちが出る部分（Figma 確定待ちの UI など）だけを別 Issue に切る
+- 新規プロジェクトで `ui-figma-ds` 部品を採用した場合は、最初にデザインの土台（Phase D）を作る（正は `docs/ui-confirmation-flow.md` §0）
+
+### 3 つの PR と本番への出し方
+
+| 種別 | base | head | 用途 | マージ |
+|---|---|---|---|---|
+| PR① | dev | feature ブランチ | 実装 + Evaluator レビュー | Orchestrator がマージゲート経由で |
+| PR② | staging | dev | デモ / UAT への昇格 | ユーザー承認（明示指示があれば代行可） |
+| PR③ | main | staging | 本番リリース | **ユーザー専権** |
+| 選択リリース / hotfix | main（R3 は staging も） | `release-*` / `hotfix/*-main` | 一部だけ本番へ・緊急修正 | **ユーザー専権** |
+
+- 昇格は原則 dev → staging → main。**例外は `docs/runbooks/release-and-hotfix.md` の 5 経路だけ**。どの経路でも dev が唯一の正で、本番にだけある変更は当日中に dev へ同期する
+- **スタック PR（PR を積む）は禁止。** feature ブランチは常に dev の最新から切る（squash マージと両立しない）
+
+### ラベル
+
+| ラベル | 意味 |
+|---|---|
+| `review-ready` | Evaluator レビュー待ち |
+| `changes-requested` | 差し戻し修正待ち |
+| `approved` | Evaluator が Approve、マージゲート経由のマージ待ち。**不在で代用しない** |
+| `blocked` | ユーザー判断待ち |
+| `demo-ready` | PR② の昇格待ち |
+| `uat` / `merge-ready` | PR③ の UAT 待ち / UAT 合格 |
+| `hotfix` | 緊急修正 |
+| `Must` / `Should` / `Could` | 優先度 |
+
+### コミット identity とマージゲート
+
+正は `docs/agents/commit-identity-and-ci-gate.md`。要点だけ:
+
+- **`git commit` に identity を自分で指定しない**（`.git/config` の値に任せる）。会話中の email は git の identity ではない
+- commit 前に `git var GIT_AUTHOR_IDENT`、push 前に `bash scripts/check-commit-authors.sh origin/dev HEAD`
+- PR① のマージは `gh workflow run merge-gate.yml -f pr=<番号>` だけ。`gh pr merge` を直接打たない
+- `mergeable=MERGEABLE` は CI の合否ではない。skip されたジョブは pass ではない
+- レビューは `gh pr comment` で記録し、合否はラベルと評決マーカーで表す（`gh pr review --approve` は同一アカウントのため拒否される）
+
+### Orchestrator のループと終了条件
+
+1. `changes-requested` の PR① → Generator に直させる
+2. `review-ready` の PR① → Evaluator にレビューさせる
+3. `approved` の PR① → マージゲート経由で dev にマージ。Sprint 完了なら PR② を作る
+4. 着手可能な Sprint → Generator に実装させる
+5. 残りが全部 `blocked` → ユーザーに報告して終了
+
+終了してよいのは「PR② が `demo-ready` / PR③ が `uat` になった」「ユーザーが停止を指示した」の 2 つだけ。
+
+### 本番環境へのアクセス規律
+
+- 本番（DB・決済・ホスティング・外部サービス・監視）へのアクセスは**読み取りが原則**
+- 作成・更新・削除・設定変更は、対象・内容・理由を示して**都度**運用者の許可を得る（過去の許可を流用しない）
+- サブエージェントには本番の認証情報を渡さない
+
+### 並行実行と片づけ
+
+- 同時に走るエージェントは**既定 2 体まで**。エージェントごとに隔離 worktree を使い、メインの作業ディレクトリのブランチを奪わない
+- `git stash` は worktree 間で共有されるので使わない
+- 報告を書く前に、自分が起動した dev サーバー・DB スタックを止める（作法は `docs/agents/agent-dev-server.md`）
+
+---
+
+## Issue の書き方
+
+- 本文に「根拠（何に触るか）」を書く。Tier は書かない
+- スコープ外の発見は Issue にする（TODO・PR コメント・レビュー本文はマージで消える）。起票前に `--state all` で重複を確認する
+- `closes #N` は PR 本文の素の本文に Issue ごとに書く（コミットメッセージでは閉じない）
+- Issue の記述は古くなる。着手前に dev の HEAD で前提を実測する
+
+## 運用の原則
+
+- **SaaS はネイティブ機能を優先する。** 運用ルールを発明する前に、公式ドキュメントで既存機能を確かめる
+- **着地は受信側で確かめる。** 送信の成功（HTTP 200・exit 0）は「どこかに届いた」であって「正しい場所に届いた」ではない
+- **外部サービスの上限は「超えたら何が起きるか」まで記録する**（課金が増えるのか、止まるのか）
+- **パイプを通すと終了コードが失われる。** 結果はファイルに落とし、終了コードを直接確認する
+
+## セッションの分担（任意）
+
+| セッション | 担当 |
+|---|---|
+| Strategy | 分析・判断・Issue 起票 |
+| Triage | 問い合わせ・不具合報告の仕分け |
+| UI / UX | UI 確定フローの発散〜確定（`ui-figma-ds` 部品を採用した場合） |
+| main | 実装（Orchestrator → Generator / Evaluator） |
+
+main は、Issue（とフロントなら Figma）が揃ってから着手する。
+
+---
+
+<!-- 以下にスタック部品の節が追加される -->

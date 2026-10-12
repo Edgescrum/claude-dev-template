@@ -1,0 +1,10 @@
+# 拡張検査（scripts/gate-extra.d/<id>.sh）の期待リスト。
+# 書式は .github/pr-gate-checks.txt と同じ（`<id> <always|deep> <ラベル…>`）。id はファイル名から .sh を除いたもの。
+#
+# スクリプトを足したら同じ PR でここに 1 行足すこと。片方だけだと scripts/gate-summary.sh が
+# MISSING（スクリプトが無い）/ UNKNOWN-ID（リストに無い）で落とす。
+# 何も無ければ空のままでよい（拡張検査は「無し」として通る）。
+#
+# 例（スタック部品が足す）:
+#   migration_versions always migration version の衝突・逆行
+#   db_tests           deep   DB ガードのテスト

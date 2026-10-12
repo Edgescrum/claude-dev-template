@@ -1,0 +1,171 @@
+name: Merge Gate
+
+# PR① を dev にマージする唯一の経路。
+#
+# なぜワークフローにするか: branch protection が見るのは required に挙げたチェックの色だけで、
+#   skip / 走らなかったジョブ / base drift / 評決 / 必須リスト外の赤 を見ない。
+#   手順は守らなくても止まらないので、検証とマージを 1 つの不可分な操作にする。
+#
+# 呼び方（Orchestrator は `gh pr merge` を直接叩かないこと）:
+#   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+#   gh workflow run merge-gate.yml --repo "$REPO" --ref dev -f pr=<PR番号>
+#   gh workflow run merge-gate.yml --repo "$REPO" --ref dev -f pr=<PR番号> -f dry_run=true   # 検証だけ
+# ローカルでも同じ判定を再現できる（マージはしない）: bash scripts/merge-gate.sh <PR番号>
+#
+# 限界: 迂回できる（post-merge-verify.yml が事後検知）/ ラベルと評決マーカーは偽装できる。
+#   詳細は docs/agents/commit-identity-and-ci-gate.md の 2-6。
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "マージする PR 番号（base は dev のみ）"
+        required: true
+      dry_run:
+        description: "true なら検証だけしてマージしない"
+        required: false
+        default: "false"
+  # 消さないこと: workflow_dispatch だけのワークフローは一度も走らないので登録されず、
+  # 永久に dispatch できない（404）。ゲート関連ファイルが変わった PR で smoke を走らせ、登録の足がかりにする。
+  pull_request:
+    paths:
+      - .github/workflows/merge-gate.yml
+      - .github/workflows/post-merge-verify.yml
+      - .github/required-checks.txt
+      - scripts/merge-gate.sh
+      - scripts/check-required-jobs.sh
+      - scripts/close-linked-issues.mjs
+      - scripts/lib/gate-common.sh
+
+permissions:
+  contents: write        # squash マージ + ブランチ削除
+  pull-requests: write   # コメント投稿 + マージ
+  issues: write          # マージ後に PR 本文の closes #N を代行する（base=dev では GitHub が閉じないため）
+  checks: read
+  statuses: read
+  actions: read          # 無いと check-runs が欠け、空の結果を「チェック 0 件」と誤読しうる
+
+concurrency:
+  # 同じ PR に対する二重実行を防ぐ（マージは冪等ではない）。smoke と混ざらないよう event 名を含める。
+  group: merge-gate-${{ github.event_name }}-${{ github.event.inputs.pr || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # PR 時のみ。マージは一切しない。登録の足がかり + ゲートが CI 環境で起動できることの確認。
+    # ★ 必須リスト（required-checks.txt）には入れない（paths: 限定なので大半の PR で欠落になる）。
+    name: マージゲートの起動確認
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: ゲートが起動できること
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null || { echo "jq がありません"; exit 1; }
+          command -v node >/dev/null || { echo "node がありません"; exit 1; }
+          node --check scripts/close-linked-issues.mjs
+          bash -n scripts/merge-gate.sh
+          bash -n scripts/check-required-jobs.sh
+          bash -n scripts/lib/gate-common.sh
+          # 引数なしは usage で exit 2。パイプに通さないこと（$? が別コマンドのものになる）。
+          rc=0
+          bash scripts/merge-gate.sh >/dev/null 2>&1 || rc=$?
+          if [ "$rc" -ne 2 ]; then
+            echo "引数なしの exit が 2 ではありません (rc=$rc)。ゲートが起動していない可能性があります。"
+            exit 1
+          fi
+          echo "OK: マージゲートは起動できます。"
+
+  gate:
+    # ★ id（gate / post-merge）を変えたら scripts/lib/gate-common.sh の GATE_SELF_JOB_IDS も直すこと。
+    name: マージゲート
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # ゲートのコードは dispatch した ref のもの（通常 dev）を使う。
+          fetch-depth: 0
+
+      - name: どのツリーのゲートで判定するかを記録する
+        # dev 以外（bootstrap）で回している間は「その PR がゲートを緩められる」ので必ず残す。
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.inputs.pr }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### ゲートのツリー"
+            echo ""
+            echo "| 項目 | 値 |"
+            echo "|---|---|"
+            echo "| ref | \`$REF_NAME\` |"
+            echo "| sha | \`$SHA\` |"
+            echo "| 対象 PR | #$PR_NUMBER |"
+            if [ "$REF_NAME" != "dev" ]; then
+              echo ""
+              echo "> ⚠️ **dev 以外のツリーのゲートで判定しています**（bootstrap）。"
+              echo "> ゲートのコードと \`.github/required-checks.txt\` はこの ref のものです。差分を必ず確認してください。"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Run merge gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=("$PR_NUMBER" --repo "$GH_REPO")
+          if [ "${DRY_RUN,,}" != "true" ]; then
+            args+=(--merge)
+          else
+            echo "::notice::dry_run=true のため、検証のみでマージはしません。"
+          fi
+          bash scripts/merge-gate.sh "${args[@]}"
+
+      # continue-on-error は必須。クローズはマージの後始末であって条件ではない。
+      # ここで落とすと post-merge（needs: gate）まで走らなくなり、マージ後検証が消える。
+      - name: マージした PR の Issue を閉じる
+        if: ${{ success() && github.event.inputs.dry_run != 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/close-linked-issues.mjs --pr "$PR_NUMBER" --repo "$GH_REPO"
+
+      - name: ゲート不合格の理由を要約する
+        if: failure()
+        env:
+          PR_NUMBER: ${{ github.event.inputs.pr }}
+        run: |
+          {
+            echo "## マージゲート不合格"
+            echo ""
+            echo "PR #$PR_NUMBER はマージされていません。"
+            echo "判定内容と限界は \`docs/agents/commit-identity-and-ci-gate.md\` の「2. マージ前 CI ゲート」を参照。"
+            echo ""
+            echo "**\`gh pr merge\` で迂回しないこと。** 迂回は post-merge-verify.yml が事後に検知して Issue を起票します。"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # GITHUB_TOKEN による push は push ワークフローを起動しないので、マージ後の再検証は
+  # reusable workflow として明示的に呼ぶ（外すと「ゲートを入れたらマージ後検証が消えた」になる）。
+  post-merge:
+    needs: gate
+    if: ${{ success() && github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true' }}
+    uses: ./.github/workflows/post-merge-verify.yml
+    with:
+      branch: dev
+      # 毎マージでは deep（test / build）を延期する。deep は定期実行と昇格時に走る。
+      # skip は post-merge-checks.txt の deep 宣言と突き合わせて gate-summary.sh が検証する。
+      deep: skip
+      trigger: merge-gate
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read

@@ -1,0 +1,26 @@
+# コミットの author / committer に許可する email の一覧（ここが唯一の置き場所）。
+#
+# 検証は scripts/check-commit-authors.sh。CI では .github/workflows/pr-gate.yml の
+# 「PR の全コミットの author を検証」ステップから呼ばれる。
+#
+# 書式:
+#   - 1 行 1 email。前後の空白と # 以降は無視される
+#   - `名前 <email>` 形式で書いてもよい（<...> の中だけが使われる）
+#   - `*` だけワイルドカードとして使える（`?` や `[...]` はリテラル扱い）
+#   - 大文字小文字は区別しない
+#   - セクション:
+#       [authors]    ... author / committer どちらにも使ってよい email
+#       [committers] ... committer としてのみ許可する email（GitHub の bot 等）
+#
+# メンバーを追加するときは [authors] に email を足して PR を出すこと。
+# （リポジトリ変数ではなくファイルにしているのは、変更が PR のレビューを通るようにするため）
+
+[authors]
+{{ALLOWED_AUTHOR}}
+
+[committers]
+# GitHub 上での squash マージ / "Update branch" / Web UI 編集の committer
+noreply@github.com
+# GitHub Actions が commit する場合
+actions@github.com
+*+github-actions[bot]@users.noreply.github.com

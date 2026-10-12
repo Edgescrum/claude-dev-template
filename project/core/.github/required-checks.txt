@@ -1,0 +1,24 @@
+# PR に「存在し、かつ決着して緑でなければならない」CI ジョブの名前。
+# 検査は scripts/check-required-jobs.sh（merge-gate.sh の [5] からも呼ばれる）。
+#
+# なぜ「存在」を見るか: PR の最後の push より後に dev へ入ったワークフローはその PR では走らない。
+#   走らないジョブは「赤くない」のではなく「存在しない」ので、`gh pr checks` は exit 0 を返す。
+# なぜ「skip」を許さないか: `if:` で skip されたジョブも名前つきで一覧に出る。
+#   GitHub の required status checks も skip を pass 扱いするので、ここで見るしかない。
+#
+# 書式:
+#   1 行 1 ジョブ名（GitHub のチェック名 = ワークフローの jobs.<id>.name。省略時は job id）。
+#   `#` 以降はコメント（`#` を含むジョブ名は書けない）。
+#   skip されても許容してよいジョブだけ行頭に `allow-skip:` を付ける（既定は skip 不許可）。
+#     allow-skip:<ジョブ名>
+#   ワークフローの jobs.<id>.name を変えたら、このファイルも同じ PR で直すこと。
+#
+# このリストに無いチェックでも、赤ければ merge-gate は止まる（--conclusive の catch-all）。
+# つまりこれは「無いと困るもの」の列挙であって、「見るもの」の全部ではない。
+#
+# 追加してはいけないもの: `paths:` などで条件付きで走るジョブ。
+#   触っていない PR で必ず「欠落」になり、全 PR がマージ不能になる。
+#   例: マージゲートの起動確認（merge-gate.yml の smoke）/ Issue クローズ経路の疎通確認（post-merge-verify.yml）
+
+# .github/workflows/pr-gate.yml（検査は 1 ジョブに統合。中身の正は .github/pr-gate-checks.txt）
+PR ゲート
