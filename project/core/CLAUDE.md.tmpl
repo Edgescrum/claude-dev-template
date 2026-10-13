@@ -16,6 +16,7 @@
 | `docs/adr/` | 設計判断と経緯。覆すときは新しい ADR を足し、旧 ADR を Superseded にする |
 | `{{REQUIREMENTS_DIR}}/` | 機能ごとの要件・詳細設計。Issue からはここにリンクする |
 | `docs/agents/` | エージェント運用の規約（判定表・閾値の唯一の置き場所） |
+| `docs/non-functional.md` | **セキュリティと非機能要件の決定**（認可マトリクス・データアクセス経路・テナント分離・秘匿情報・目標値）。認可の実装・レビューはこれを正とする。何を聞くかの手引きは `docs/security-and-nfr-stage.md` |
 | `docs/verification-tiers.md` | 検証 Tier の定義 |
 | `docs/runbooks/` | 本番への出し方（`release-and-hotfix.md`）などの手順書 |
 | `docs/bootstrap.md` | 初期化（Planner Phase 0）の記録。**このファイルがある = 初期化済み** |
@@ -70,7 +71,7 @@
 - 大きめの機能は `{{REQUIREMENTS_DIR}}/` に要件を残す（会話やメモリに任せない）
 - 着手前に `CONTEXT.md`・`docs/adr/`・`{{REQUIREMENTS_DIR}}/` の既存設計を確認する
 - スプリント単位で grill（`/grill-with-docs` または `/grill-me`）による詳細設計を行い、既存挙動への回帰影響・ADR との整合・回帰テストで守る挙動を明文化する
-- grill ではデータ契約（画面が読み書きするデータの形・認可）まで決める。Issue は機能単位の縦切りにし、フロントとバックで工程を分けない。待ちが出る部分（Figma 確定待ちの UI など）だけを別 Issue に切る
+- grill ではデータ契約（画面が読み書きするデータの形・認可）まで決める。新しい資源・ロール・他人のデータの扱い・外部入力・重い処理があれば `docs/non-functional.md` に追記する（データアクセス経路を覆すなら ADR）。Issue は機能単位の縦切りにし、フロントとバックで工程を分けない。待ちが出る部分（Figma 確定待ちの UI など）だけを別 Issue に切る
 - 新規プロジェクトで `ui-figma-ds` 部品を採用した場合は、最初にデザインの土台（Phase D）を作る（正は `docs/ui-confirmation-flow.md` §0）
 
 ### 3 つの PR と本番への出し方

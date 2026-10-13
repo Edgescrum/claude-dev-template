@@ -3,6 +3,10 @@
 PostgreSQL（Supabase）を DB に使う。**Supabase Auth を使うかどうかは要件で決め、ここに 1 行で書く**:
 （記入: 例「Supabase Auth は使わず、独自の users テーブル + Cookie セッション」）
 
+**この部品の規則は、データアクセス経路（`docs/non-functional.md` の A2）が「(a) 公開 API + RLS」であることを前提にしている。**
+(b) サーバー専用を選んだ場合は、下の「クライアントの使い分け」「RLS と service-role」を ADR に沿って書き換えること
+（サーバー専用の部品はまだ雛形に無い）。
+
 ### クライアントの使い分け
 
 | 置き場所 | 用途 | 生成 |
